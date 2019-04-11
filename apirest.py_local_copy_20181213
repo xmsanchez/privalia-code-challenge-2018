@@ -1,0 +1,945 @@
+from flask import Flask, request, jsonify
+from operator import itemgetter
+import copy
+import random
+import time
+import signal
+
+app = Flask(__name__)
+
+maze = None
+player = None
+enemies = None
+playerEnemies = None
+gameid = None
+
+class new_maze():
+    def __init__(self, content):
+        self.content = content
+        self.walls = content['board']['walls']
+        self.size = content['board']['size']
+        self.height = self.size["height"]
+        self.width = self.size["width"]
+        self.basicMaze = None
+        self.currentMaze = None
+        self.invaders = content['invaders']
+        self.invadersFound = []
+        self.players = content['players']
+        self.playersFound = []
+        self.gameid = content['game']['id']
+
+    def setNewContent(self, content):
+        self.content = content
+        self.walls = content['board']['walls']
+        self.invaders = content['invaders']
+        self.players = content['players']
+        self.position = content['player']['position']
+        self.previous_position = content['player']['previous']
+
+    def get_size(self):
+        return self.size
+
+    def get_walls(self):
+        return self.walls
+
+    def calculate_distance(self, start, target):
+        startx = start['x']
+        starty = start['y']
+        targetx = target['x']
+        targety = target['y']
+        distance = abs(startx - targetx) + abs(starty - targety)
+        return distance
+
+    def buildMaze(self):
+        self.buildOuterWalls()
+
+    def buildOuterWalls(self):
+        if self.basicMaze == None:
+            self.basicMaze = []
+            for i in range(0, self.height):
+                arr = []
+                for t in range(0, self.width):
+                    if i == 0 or i == self.height - 1:
+                        arr.append("W")
+                    elif t == 0 or t == self.width - 1:
+                        arr.append("W")
+                    else:
+                        arr.append(" ")
+                self.basicMaze.append(arr)
+
+    def updateInnerWalls(self):
+        for wall in self.walls:
+            x = wall["x"]
+            y = wall["y"]
+            self.basicMaze[y][x] = "W"
+
+    def buildCurrentMaze(self):
+        self.currentMaze = copy.deepcopy(self.basicMaze)
+        self.setPlayerInMap()
+        self.setEnemiesInMap()
+        self.setOtherPlayersInMap()
+
+    def setEnemiesInMap(self):
+        for invader in self.invaders:
+                x = invader["x"]
+                y = invader["y"]
+                self.currentMaze[y][x] = "I"
+                self.invadersFound.append(invader)
+
+    def setOtherPlayersInMap(self):
+        for otherPlayer in self.players:
+                x = otherPlayer["x"]
+                y = otherPlayer["y"]
+                self.currentMaze[y][x] = "O"
+                self.playersFound.append(otherPlayer)
+
+    def setPlayerInMap(self):
+        x = self.position["x"]
+        y = self.position["y"]
+        lastx = self.previous_position["x"]
+        lasty = self.previous_position["y"]
+        # Set Last position
+        self.currentMaze[lasty][lastx] = "L"
+        # Set player pos
+        self.currentMaze[y][x] = "P"
+
+    def printMap(self):
+        print("Mapa generado:")
+        for i in self.currentMaze:
+            print(i)
+
+
+class new_player():
+    def __init__(self, content):
+        self.content = content
+        self.id = self.content['player']['id']
+        self.name = self.content['player']['name']
+        self.position = self.content['player']['position']
+        self.previous = self.content['player']['previous']
+        self.previousMove = None
+        self.canShoot = self.content['player']['fire']
+        self.maze = None
+        self.invadersFound = None
+        self.playersFound = None
+        self.invaders = None
+        self.players = None
+        self.possible_moves = []
+        self.last_quadrant_visited = None
+        self.target_set = None
+        self.target = None
+        self.random_movements = 0
+        self.movements_to_path = 0
+        self.non_walkable_spots = []
+
+    def get_id(self):
+        return self.id
+
+    def get_name(self):
+        return self.name
+
+    def update_values(self, content, maze):
+        self.content = content
+        self.position = self.content['player']['position']
+        self.previous = self.content['player']['previous']
+        self.canShoot = self.content['player']['fire']
+        self.maze = maze
+        self.invadersFound = self.maze.invadersFound
+        self.playersFound = self.maze.playersFound
+        self.invaders = self.maze.invaders
+        self.players = self.maze.players
+        print("Player position: " + str(player.get_x()) + ", "  + str(player.get_y()))
+        
+    def get_x(self):
+        return self.position['x']
+
+    def get_y(self):
+        return self.position['y']
+
+    def get_previous_x(self):
+        return self.previous['x']
+
+    def get_previous_y(self):
+        return self.previous['y']
+
+    def isWall(self, coords):
+        x = coords["x"]
+        y = coords["y"]
+        if self.maze.currentMaze[y][x] == "W":
+            return True
+        else:
+            return False
+
+    def isEnemy(self, coords):
+        x = coords[0]
+        y = coords[1]
+        if self.currentMaze[y][x] == "I":
+                print("Found enemy!")
+                return True
+        else:
+                return False
+
+    def isPlayer(self, coords):
+        x = coords[0]
+        y = coords[1]
+        if self.currentMaze[y][x] == "E":
+                print("Found enemy player!")
+                return True
+        else:
+                return False
+
+
+    def printPath(self, path):
+        for i in path:
+            if 'coords' in i:
+                x = i["coords"]["x"]
+                y = i["coords"]["y"]
+                if self.maze.currentMaze[y][x] == " ":
+                    self.maze.currentMaze[y][x] = "o"
+
+    ################################################
+    # Inici de funcions de PATHFINDING
+    # F is the total cost of the node.
+    # G is the distance between the current node and the start node.
+    # H is the heuristic — estimated distance from the current node to the end node.
+    # https://medium.com/@nicholas.w.swift/easy-a-star-pathfinding-7e6689c7f7b2
+
+    def recordPathMovementsToTarget(self, path):
+        self.movements_to_path == len(path)
+
+    def getMinFCost(self, open_list):
+        node = min(open_list, key=itemgetter('f'))
+        return node
+
+    def getMinGCost(self, open_list):
+        node = min(open_list, key=itemgetter('g'))
+        return node
+
+    def reconstructPath(self, came_from, current, end, start):
+        #print("Let's reconstruct the path! " + str(len(came_from)))
+        path = []
+        #print("came from: " + str(came_from))
+        try:
+            if len(came_from) > 1:
+                parent = came_from[0]["parent_node"]
+                path.append(parent)
+                #print("search parent: " + str(parent))
+                for i in came_from:
+                    if i["coords"] == parent:
+                        path.append(i)
+                        parent = i["parent_node"]
+                #print("Path length: " + str(len(path)))
+                self.recordPathMovementsToTarget(path)
+                self.random_movements += 1
+                return path
+            else:
+                return []
+        except ValueError as Ex:
+            print("OoopS! Exception catched! " + str(Ex))
+            return "pass"
+
+    def calculateCost(self, item, parent, end):
+        g = parent["g"] + self.maze.calculate_distance(item["coords"], parent["coords"])
+        h = self.maze.calculate_distance(item["coords"], end)
+        f = float(g) + float(h)
+        item["g"] = g
+        item["h"] = h
+        item["f"] = f
+        return item
+
+    def getNeighbours(self, parent):
+        x = parent["coords"]["x"]
+        y = parent["coords"]["y"]
+        spots = []
+        spots.append({'coords': {'x': x, 'y': y - 1}})
+        spots.append({'coords': {'x': x, 'y': y + 1}})
+        spots.append({'coords': {'x': x - 1, 'y': y}})
+        spots.append({'coords': {'x': x + 1, 'y': y}})
+        return spots
+
+    # Use A* search algorithm
+    def findPath(self, target):
+        end = target #{'x': 6, 'y': 9}
+        distance = self.maze.calculate_distance(self.position, end)
+        start = {'coords': self.position, 'g': distance}
+        start = self.calculateCost(start, start, end)
+        current_node = start
+        closed_list = []
+        open_list = []
+        came_from = []
+        nodeWithLessFCost = None
+        nodeWithLessGCost = None
+        open_list.append(current_node)
+        iterations = 0
+        while len(open_list) > 0:
+            nodeWithLessFCost = self.getMinFCost(open_list)
+            
+            # If we can not find a path after 2500 iterations we return an empty array
+            if iterations == 2500:
+                return []
+
+            # If we discover that our target is a wall we cannot go on
+            if self.isWall(end):
+                return []
+
+            # We found the path to the target!!
+            if nodeWithLessFCost["coords"] == end:
+                # Append this last node
+                came_from.append(nodeWithLessFCost)
+                # Sort the path in a reverse way
+                sorted_came_from = came_from[::-1]
+                return self.reconstructPath(sorted_came_from, nodeWithLessFCost, end, start["coords"])
+
+            children = self.getNeighbours(nodeWithLessFCost)
+            for child in children:
+
+                # Calculate the G cost for this spot
+                calculateGCost = self.calculateCost(child, nodeWithLessFCost, end)
+                # Set the parent of this child
+                child["parent_node"] = nodeWithLessFCost["coords"]
+
+                if self.isWall(child["coords"]):
+                    continue
+
+                if child in closed_list:
+                    continue
+
+                if child in open_list:
+                    # Ths child's cost is greater or equal to the parent
+                    if child["g"] >= nodeWithLessFCost["g"]:
+                        continue
+
+                # Append the child to the open list if it's not there
+                open_list.append(child)
+                # Add the child as is walkable and possible optimal path
+                came_from.append(child)
+
+            # Remove the current spot from the open list as it's already checked
+            open_list.remove(nodeWithLessFCost)
+            # Append the node to the closed list to avoid checking it again
+            closed_list.append(nodeWithLessFCost)
+            iterations += 1
+                
+        print("Surto del while")
+
+    # Fi de funcions de PATHFINDING
+    ###################################
+
+    def enemyTooClose(self, enemies):
+        if len(enemies) > 0:
+            closest = 10000
+            distance = 0
+            closestEnemy = []
+            print("We have " + str(len(enemies)) + " in sight!")
+            for enemy in enemies:
+                enemyx = enemy['x']
+                enemyy = enemy['y']
+                distance = self.maze.calculate_distance(self.position, enemy)
+                if float(distance) < float(closest):
+                    closest = distance
+                    closestEnemy = enemy
+            closestDistance = self.maze.calculate_distance(self.position, closestEnemy)
+            print("Closest enemy distance is: " + str(closestDistance))
+            return closestEnemy
+    
+    def checkRight(self):
+        playerx = self.get_x() + 1
+        playery = self.get_y()
+        return {'x': playerx, 'y': playery}
+
+    def checkLeft(self):
+        playerx = self.get_x() - 1
+        playery = self.get_y()
+        return {'x': playerx, 'y': playery}
+
+    def checkUp(self):
+        playerx = self.get_x()
+        playery = self.get_y() - 1
+        return {'x': playerx, 'y': playery}
+
+    def checkDown(self):
+        playerx = self.get_x()
+        playery = self.get_y() + 1
+        return {'x': playerx, 'y': playery}
+
+    def enemyDangerInThatSpot(self, spot):
+        non_walkable_spots = self.non_walkable_spots
+        for non_walkable in non_walkable_spots:
+            if spot == non_walkable['coords'] or self.isWall(spot):
+                return True
+        return False
+
+    def avoidEnemy(self, enemy):
+        playerx = self.get_x()
+        playery = self.get_y()
+        enemyx = enemy['x']
+        enemyy = enemy['y']
+        enemytype = enemy['type']
+        print("Enemy type: " + str(enemytype))
+        moves = ['down', 'up', 'left', 'right']
+        avoid = []
+        move = "pass"
+        if playery < enemyy:
+            avoid.append("down")
+        if playery > enemyy:
+            avoid.append("up")
+        if playerx > enemyx:
+            avoid.append("left")
+        if playerx < enemyx:
+            avoid.append("right")
+        
+        # We also check spots against enemy options
+        player_right = self.checkRight()
+        player_left = self.checkLeft()
+        player_up = self.checkUp()
+        player_down = self.checkDown()
+
+        if self.enemyDangerInThatSpot(player_right):
+            avoid.append("right")
+        if self.enemyDangerInThatSpot(player_left):
+            avoid.append("left")
+        if self.enemyDangerInThatSpot(player_up):
+            avoid.append("up")
+        if self.enemyDangerInThatSpot(player_down):
+            avoid.append("down")
+
+        if enemytype is "player":
+            print("Enemy type is player! Try to dodge it!!")
+            if playerx == enemyx:
+                avoid.append("left")
+                avoid.append("right")
+            if playery == enemyy:
+                avoid.append("up")
+                avoid.append("down")
+
+        print("Need to avoid enemy. Cannot go: " + str(avoid))
+
+        if len(avoid) == 4:
+            print("We cannot go anywhere!!")
+            return move
+
+        while True:
+            move = random.choice(moves)
+            if move not in avoid:
+                print("We can go in this direction!! " + str(move))
+                print("Movements to avoid were: " + str(avoid))
+                return move
+
+    def enemyInSight(self, enemy):
+        x = enemy["x"]
+        y = enemy["y"]
+        if self.get_x() == x or self.get_y() == y:
+            #print("enemy: " + str(enemy))
+            if "neutral" in enemy:
+                print("Enemy aligned but neutral!")
+                return enemy
+            else:
+                print("Enemy aligned and not neutral!")
+                return enemy
+        else:
+            return {}
+
+    # Ensure that there are no walls between player and target
+    def getClearShot(self, x1, y1, x2, y2, direction):
+        if x1 < x2:
+            for x in range(x1, x2):
+                if self.isWall({'x': x, 'y': y1}):
+                    print("Found wall at " + str(x) + ", " + str(y1) + " , can't shoot")
+                    return "pass"
+            return "fire-right"
+        if x1 > x2:
+            for x in range(x2, x1):
+                if self.isWall({'x': x, 'y': y1}):
+                    ("Found wall at " + str(x) + ", " + str(y1) + " , can't shoot")
+                    return "pass"
+            return "fire-left"
+        if y1 < y2:
+            for y in range(y1, y2):
+                if self.isWall({'x': x1, 'y': y}):
+                    ("Found wall at " + str(x1) + ", " + str(y) + " , can't shoot")
+                    return "pass"
+            return "fire-down"
+        if y1 > y2:
+            for y in range(y2, y1):
+                if self.isWall({'x': x1, 'y': y}):
+                    ("Found wall at " + str(x1) + ", " + str(y) + " , can't shoot")
+                    return "pass"
+            return "fire-up"
+
+    # Return move based on enemy position
+    def getFireMove(self, enemy):
+        playerx = self.get_x()
+        playery = self.get_y()
+        print("get fire move enemy: " + str(enemy))
+        enemyx = enemy['x']
+        enemyy = enemy['y']
+        if playerx == enemyx:
+            if playery < enemyy:
+                move = self.getClearShot(playerx, playery, enemyx, enemyy, "down")
+                return move
+            else:
+                move = self.getClearShot(playerx, playery, enemyx, enemyy, "up")
+                return move
+        if playery == enemyy:
+            if playerx < enemyx:
+                move = self.getClearShot(playerx, playery, enemyx, enemyy, "right")
+                return move
+            else:
+                move = self.getClearShot(playerx, playery, enemyx, enemyy, "left")
+                return move
+
+    def needToAvoidEnemy(self, enemy, enemies):
+        # If we can't shoot we need to avoid invaders and players at all costs!
+        print("Need to avoid enemy!")
+        enemyToAvoid = self.enemyTooClose(enemies)
+        print("Enemy to avoid: " + str(enemyToAvoid))
+        if enemyToAvoid is not None:
+            if len(enemyToAvoid) > 0:
+                if "neutral" in enemyToAvoid:
+                    if enemyToAvoid["neutral"]:
+                        return "pass"
+                print(enemy['type'] + " is not neutral!")
+                move = self.avoidEnemy(enemyToAvoid)
+                print("Avoid enemy from needToAvoidEnemy " + str(move))
+                return move
+        return "pass"
+
+    def getMove(self, path):
+        x = self.get_x()
+        y = self.get_y()
+
+        if len(path) == 1:
+            targetx = path[len(path) - 1]["x"]
+            targety = path[len(path) - 1]["y"]
+        else:
+            targetx = path[len(path) - 1]["coords"]["x"]
+            targety = path[len(path) - 1]["coords"]["y"]
+
+        xdistance = abs(x - targetx)
+        ydistance = abs(y - targety)
+
+        # We may be almost aligned to target, try that movement
+        if xdistance == 1:
+            if x < targetx:
+                move = "right"
+            else:
+                move = "left"
+            return move
+        if ydistance == 1:
+            if y < targety:
+                move = "down"
+            else:
+                move = "up"
+            return move
+
+        # Any other case defaults movements
+        move = ""
+        if x < targetx:
+            print("Go right")
+            move = "right"
+        elif x > targetx:
+            print("Go left")
+            move = "left"
+        elif y > targety:
+            print("Go up")
+            move = "up"
+        elif y < targety:
+            print("Go down")
+            move = "down"
+
+        print("Get move: " + str(move))
+        return move
+
+    def selectRandomGoal(self):
+        self.movements_to_path = 0
+        self.random_movements = 0
+        maze_height = self.maze.height
+        maze_width = self.maze.width
+        print("Maze size - x: " + str(maze_width) + ", y: " + str(maze_height))
+        q_top_left = {'x': 1, 'y': 1}
+        q_top_right = {'x': maze_width - 2, 'y': 1}
+        q_bottom_left = {'x': 1, 'y': maze_height - 2}
+        q_bottom_right = {'x': maze_width - 2, 'y': maze_height - 2}
+        quadrants = [q_top_left, q_top_right, q_bottom_left, q_bottom_right]
+        new_quadrant_to_visit = random.choice(quadrants)
+        print("Our new goal is " + str(new_quadrant_to_visit))
+        return new_quadrant_to_visit
+
+    def goToTarget(self, target):
+        print("New target!! " + str(target))
+        self.target = target
+            
+        path = self.findPath(self.target)
+        if len(path) == 0:
+            print("Select random goal because our path length is " + str(len(path)))
+            self.target = self.selectRandomGoal()
+            path = self.findPath(self.target)
+
+        # Print our path in map
+        self.printPath(path)
+
+        if len(path) > 0:
+            move = self.getMove(path)
+            print("Go to target, next move: " + move)
+        else:
+            print("No path selected!!")
+
+        path = []
+
+        return move
+
+    def goToRandomSpot(self):
+        # Find an optimal path to the target
+        if self.target is None:
+            self.target = self.selectRandomGoal()
+            
+        path = self.findPath(self.target)
+        if len(path) < 4:
+            print("Path length is: " + str(len(path)))
+            self.target = self.selectRandomGoal()
+            path = self.findPath(self.target)
+
+        move = ""
+
+        # Print our path in map
+        self.printPath(path)
+
+        if len(path) > 0:
+            move = self.getMove(path)
+            print("Go to random spot, next move: " + move)
+        else:
+            print("No path selected!!")
+
+        return move
+
+    def calculateMovementsForAllEnemies(self, enemies):
+        invaders = enemies['invaders']
+        players = enemies['players']
+        
+        non_walkable_spots = []
+        all_enemies = []
+        closest = []
+        spots = []
+
+        for i in invaders:
+            all_enemies.append(i)
+        for i in players:
+            all_enemies.append(i)
+
+        if len(all_enemies) > 0:
+            for enemy in all_enemies:
+                enemy_coords = {'x': enemy['x'], 'y': enemy['y']}
+                #print("Calculate movements for enemy: " + str(enemy_coords))
+                enemy['coords'] = enemy_coords
+                spots = self.getNeighbours(enemy)
+                for spot in spots:
+                    non_walkable_spots.append(spot)
+            #print("Non walkable spots are: " + str(non_walkable_spots))
+            self.non_walkable_spots = non_walkable_spots
+
+    def findEnemiesInSurroundings(self):
+        print("Let's search for enemies")
+        enemies = {}
+        total_invaders = int(len(self.invaders))
+        total_players = int(len(self.players))
+        enemies['invaders'] = self.invaders
+        enemies['players'] = self.players
+        enemies['total'] = total_invaders + total_players
+
+        print("Enemies in surroundings: " + str(enemies['total']))
+        return enemies
+
+    def getClosestEnemyDistance(self, enemies):
+        closest_enemy = {}
+        last_distance = None
+        for enemy in enemies:
+            enemy_coords = {'x': enemy['x'], 'y': enemy['y']}
+            enemy['coords'] = enemy_coords
+            distance = self.maze.calculate_distance(self.position, enemy['coords'])
+            if last_distance is None:
+                enemy['distance'] = distance
+                closest_enemy = enemy
+            else:
+                if distance < last_distance:
+                    enemy['distance'] = distance
+                    closest_enemy = enemy
+        print("Closest enemy is at " + str(distance))
+        return closest_enemy
+
+    def calculateEnemyDistance(self, enemies):
+        closest_enemy = {}
+        last_distance = None
+        print("Let's calculate distance for all enemies: " + str(len(enemies)))
+        for enemy in enemies:
+            enemy_coords = {'x': enemy['x'], 'y': enemy['y']}
+            enemy['coords'] = enemy_coords
+            path = self.findPath(enemy_coords)
+            distance = len(path)
+            #print("Enemy distance: " + str(path))
+            if last_distance is None:
+                enemy['distance'] = distance
+                closest_enemy = enemy
+                last_distance = distance
+            else:
+                if distance < last_distance:
+                    enemy['distance'] = distance
+                    closest_enemy = enemy
+                    last_distance = distance
+        return closest_enemy
+
+    def getClosestPlayer(self, enemies):
+        all_enemies = enemies['players']
+        closest = []
+
+        closest_enemy = self.calculateEnemyDistance(all_enemies)
+
+        if closest_enemy == {}:
+            return []
+        else:
+            closest_enemy['type'] = 'player'
+            closest = closest_enemy
+
+            print("Closest player: " + str(closest))
+            return closest
+
+    def getClosestEnemy(self, enemies):
+        invaders = enemies['invaders']
+        players = enemies['players']
+
+        all_enemies = []
+        closest = []
+
+        for i in invaders:
+            all_enemies.append(i)
+        for i in players:
+            all_enemies.append(i)
+
+        closest_enemy = self.calculateEnemyDistance(all_enemies)
+
+        if "neutral" in closest_enemy:
+            print("Closest enemy is an invader!")
+            closest_enemy['type'] = 'invader'
+            closest = closest_enemy
+        else:
+            print("Closest enemy is a player!")
+            closest_enemy['type'] = 'player'
+            closest = closest_enemy
+
+        print("Closest enemy: " + str(closest))
+        return closest
+
+    def enemyShootableFire(self, enemy, enemyShootable):
+        print("Enemy in sight!! enemy " + str(enemy))
+        print("Enemy in sight!! enemyShootable " + str(enemyShootable))
+        move = self.getFireMove(enemy)
+        if move is not "pass" and move is not "" and move is not None:
+            print(enemy['type'] + " is in sight! Can shoot!! FIRE!! -> " + str(move))
+            return move
+        else:
+            print("There's a wall, can't shoot " + enemy['type'] + ", will move -> " + str(move))
+            return move
+
+    def tryToFire(self, enemy):
+        # We have ammo! Let's try to get the enemy in sight
+        enemyShootable = self.enemyInSight(enemy)
+        print("We've got ammo! Enemy is shootable? " + str(enemyShootable))
+        if 'type' in enemyShootable:
+            move = self.enemyShootableFire(enemy, enemyShootable)
+            return move
+        else:
+            if enemy['distance'] > 2:
+                move = self.goToTarget(enemy['coords'])
+                print("Enemy not in sight and not too close. Next move: " + str(move))
+                return move
+            else:
+                return "pass"
+
+    def checkIfPlayerInSight(self, enemies):
+        players = enemies['players']
+        if len(players) > 0:
+            for enemy in enemies['players']:
+                print("Found another player! " + str(enemy))
+                return True
+        return False
+
+    def noAmmo(self):
+        if not self.canShoot:
+            return True
+        else:
+            return False
+
+    def decideMoveNoAmmo(self, enemy, enemyShootable):
+        print("We have no ammo!!")
+        if enemy['distance'] > 2:
+            move = self.goToTarget(enemy['coords'])
+            return move
+        elif enemy['distance'] <= 1 and enemy['neutral']:
+            move = self.getMove([enemy])
+            #move = self.goToTarget(enemy['coords'])
+            print("Enemy is neutral and next to us, just step on it: " + str(move))
+            return move
+        else:
+            print("Avoid enemy!!")
+            move = self.avoidEnemy(enemy)
+            return move
+
+    def targetOtherEnemies(self, enemies):
+        for enemy in enemies['invaders']:
+            enemyShootable = self.enemyInSight(enemy)
+            if 'type' in enemyShootable:
+                return True
+
+
+    def dealWithPlayers(self, enemies):
+        enemy = self.getClosestPlayer(enemies)
+        print("Try to dodge closest player: " + str(enemy))
+        move = self.avoidEnemy(enemy)
+        if move is not "pass" and move is not "":
+            return move
+        else:
+            # If we cannot dodge the player just try to fire it
+            move = self.tryToFire(enemy)
+            return move
+
+    def dealWithNeutralEnemy(self, enemy):
+        move = self.getMove([enemy])
+        print("Enemy is neutral so we can just step on it! " + str(move))
+        return self.returnMoveIfIsValid(move)
+        
+        # If move was "" or "pass" then:
+        move = self.tryToFire(enemy)
+        return self.returnMoveIfIsValid(move)
+
+    def dealWithOtherEnemies(self, enemies, enemy, enemyShootable):
+        # Check if it's neutral, then just step on it :-D
+        if enemy['neutral'] and enemy['distance'] == 1:
+            move = self.dealWithNeutralEnemy(enemy)
+
+        # Enemy it's too close, test if it's in sight and otherwise just run
+        elif enemy['distance'] == 1:
+            print("Enemy too close, check if it's in sight")
+            move = self.enemyShootableFire(enemy, enemyShootable)
+        
+        # We've got ammo and closest enemy is at least at 2 moves of distance or just next to us, try to fire
+        elif enemy['distance'] >= 2:
+            move = self.tryToFire(enemy)        
+                
+        # Too many enemies are too close, try to target other enemies if we can do it (looks like suicide but can get some points)
+        elif self.targetOtherEnemies(enemies):
+            print("There are other enemies in sight, try to shoot")
+            move = self.enemyShootableFire(enemy, enemyShootable)
+        
+        # OK, we couldn't find any valid movements so just try to avoid enemies
+        if move is "pass" or move is "":
+            print("Enemy too close and not in sight")
+            move = self.avoidEnemy(enemy)
+        
+        return move
+
+    def returnMoveIfIsValid(self, move):
+        if move is not "pass" and move is not "":
+            return move
+
+    # Decide what's the best next move
+    def decideMove(self, maze):
+        move = ""
+
+        # We keep track of possible enemy movements to avoid getting caught!
+        enemies = self.findEnemiesInSurroundings()
+        self.calculateMovementsForAllEnemies(enemies)
+
+        # There are enemies
+        if enemies['total'] > 0:
+
+            # First check if a Player is in sight, no matter where
+            if self.checkIfPlayerInSight(enemies):
+                move = self.dealWithPlayers()
+                if move is not "pass" and move is not "":
+                    return move
+
+            # If there are no players in sight search for the closest enemy and check if it's in sight for shooting
+            enemy = self.getClosestEnemy(enemies)
+            enemyShootable = self.enemyInSight(enemy)
+
+            # If no ammo just check if we can move towards the enemy or need to avoid it
+            if self.noAmmo():
+                move = self.decideMoveNoAmmo(enemy, enemyShootable)
+                if move is not "pass" and move is not "":
+                    return move
+
+            # If we DO have ammo check all possible movements
+            else:
+                move = self.dealWithOtherEnemies(enemies, enemy, enemyShootable)
+                if move is not "pass" and move is not "":
+                    return move
+
+            # If somehow we didn't manage to get a move just select a random spot in the maze and go for it
+            move = self.goToRandomSpot()
+            return move
+
+        # If somehow we didn't manage to get a move just select a random spot in the maze and go for it
+        move = self.goToRandomSpot()
+        return move
+
+
+@app.route('/', methods=['GET', 'POST'])
+def api_root():
+    return "Welcome to my World!!"
+
+
+@app.route('/name', methods=['GET','POST'])
+def nameHandler():
+        content = request.get_json(silent=True)
+        name = '{"name": "xavier.miranda","email":"xavier.miranda@ext.privalia.com"}'
+        return name
+
+
+@app.route('/move', methods=['GET','POST'])
+def moveHandler():
+    global maze
+    global player
+    global enemies
+    global playerEnemies
+    reinitialize = False
+    print(" ")
+    print(" ")
+
+    # Get the request json
+    content = request.get_json(silent=True)
+
+    # Check if the game must be reinitialized (new game)
+    if maze is not None:
+        if content['game']['id'] != maze.gameid:
+            print("Game id changed! New map! Reinitialize!!")
+            reinitialize = True
+
+    # Build the maze
+    if maze is None or reinitialize is True:
+        maze = new_maze(content)
+        maze.buildMaze()
+
+    # Update variables with new elements seen
+    maze.setNewContent(content)
+    # Update the maze with the new found walls
+    maze.updateInnerWalls()
+    # Update the map with spots we've already visited
+    maze.buildCurrentMaze()
+
+    # Build the player
+    if player is None or reinitialize is True:
+        player = new_player(content)
+    
+    # Update player object with a reference of the maze object and the json request
+    player.update_values(content, maze)
+    
+    # Decide next move
+    next_move = player.decideMove(maze)
+    
+    # Print the temporal maze array
+    maze.printMap()
+
+    # Return response to the server
+    print("Return response: " + str(next_move))
+    response = '{"move": "' + str(next_move) + '"}'
+    return response
+
+app.run(host='0.0.0.0', port= 5000)
